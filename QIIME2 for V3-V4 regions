@@ -1,0 +1,168 @@
+#!/bin/bash
+# ==============================================================================
+# QIIME2 Bioinformatic Workflow Protocol (V3-V4 Region)
+# Software Environment: QIIME2 (version 2023.5)
+# Reference Database: Greengenes2 (2022)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# STEP 1: Activate QIIME2 Environment
+# ------------------------------------------------------------------------------
+conda activate qiime2-2023.5
+
+# ------------------------------------------------------------------------------
+# STEP 2 & 3: Import Sequences using Manifest File
+# ------------------------------------------------------------------------------
+# Ensure you are inside your working directory (e.g., 'vacas') 
+# containing the 'seqs_and_metadata' folder with MANIFEST.csv and metadata.txt
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path seqs_and_metadata/MANIFEST.csv \
+  --output-path demux.qza \
+  --input-format 'PairedEndFastqManifestPhred33'
+
+# Verify sequence import
+qiime tools peek demux.qza
+
+# ------------------------------------------------------------------------------
+# STEP 4: Trim Primers / Cutadapters
+# ------------------------------------------------------------------------------
+qiime cutadapt trim-paired \
+  --i-demultiplexed-sequences demux.qza \
+  --p-front-f CCTACGGGNGGCWGCAG \
+  --p-front-r GACTACHVGGGTATCTAATCC \
+  --o-trimmed-sequences demux_trimmed.qza
+
+# Summarize trimmed sequences for visualization
+qiime demux summarize \
+  --i-data demux_trimmed.qza \
+  --o-visualization demux_trimmed.qzv
+
+# ------------------------------------------------------------------------------
+# STEP 5: ASV Inference with DADA2
+# ------------------------------------------------------------------------------
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs demux_trimmed.qza \
+  --p-trim-left-f 0 \
+  --p-trim-left-r 0 \
+  --p-trunc-len-f 0 \
+  --p-trunc-len-r 0 \
+  --p-max-ee-f 2 \
+  --p-max-ee-r 4 \
+  --p-trunc-q 5 \
+  --p-pooling-method pseudo \
+  --p-chimera-method pooled \
+  --o-representative-sequences rep-seqs.qza \
+  --o-table feature-table.qza \
+  --o-denoising-stats denoising-stats.qza \
+  --p-n-threads 5
+
+# Summarize feature table and denoising statistics
+qiime feature-table summarize \
+  --i-table feature-table.qza \
+  --o-visualization feature-table.qzv \
+  --m-sample-metadata-file seqs_and_metadata/metadata.txt
+
+qiime metadata tabulate \
+  --m-input-file denoising-stats.qza \
+  --o-visualization denoising-stats.qzv
+
+qiime feature-table tabulate-seqs \
+  --i-data rep-seqs.qza \
+  --o-visualization rep-seqs.qzv
+
+# ------------------------------------------------------------------------------
+# STEP 6: Taxonomic Classification (Greengenes2 2022)
+# ------------------------------------------------------------------------------
+qiime feature-classifier classify-sklearn \
+  --i-classifier gg_2022_full_length.nb.qza \
+  --i-reads rep-seqs.qza \
+  --o-classification taxonomy.qza
+
+qiime metadata tabulate \
+  --m-input-file taxonomy.qza \
+  --o-visualization taxonomy.qzv
+
+# ------------------------------------------------------------------------------
+# STEP 7: Filtering (Removal of Archaea and Unassigned Taxa)
+# ------------------------------------------------------------------------------
+qiime taxa filter-table \
+  --i-table feature-table.qza \
+  --i-taxonomy taxonomy.qza \
+  --p-exclude Archaea,Unassigned \
+  --o-filtered-table feature-table-no-archaea.qza
+
+# Summarize filtered table
+qiime feature-table summarize \
+  --i-table feature-table-no-archaea.qza \
+  --o-visualization feature-table-no-archaea.qzv \
+  --m-sample-metadata-file seqs_and_metadata/metadata.txt
+
+# ------------------------------------------------------------------------------
+# STEP 8: Phylogenetic Tree Construction
+# ------------------------------------------------------------------------------
+qiime phylogeny align-to-tree-mafft-fasttree \
+  --i-sequences rep-seqs.qza \
+  --o-alignment aligned-rep-seqs.qza \
+  --o-masked-alignment masked-aligned-rep-seqs.qza \
+  --o-tree unrooted-tree.qza \
+  --o-rooted-tree rooted-tree.qza
+
+# ------------------------------------------------------------------------------
+# STEP 9: Core Diversity Metrics and Rarefaction
+# ------------------------------------------------------------------------------
+# Note: Replace '--p-sampling-depth' with the minimum frequency value 
+# determined from the filtered feature table summary (e.g., 30000)
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny rooted-tree.qza \
+  --i-table feature-table-no-archaea.qza \
+  --p-sampling-depth 30000 \
+  --m-metadata-file seqs_and_metadata/metadata.txt \
+  --output-dir core-metrics-results
+
+# ------------------------------------------------------------------------------
+# STEP 10: Alpha and Beta Diversity Statistical Significance
+# ------------------------------------------------------------------------------
+# Alpha Diversity Group Significance (Observed Features, Shannon, Evenness, Faith)
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/observed_features_vector.qza \
+  --m-metadata-file seqs_and_metadata/metadata.txt \
+  --o-visualization core-metrics-results/observed-features_significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/shannon_vector.qza \
+  --m-metadata-file seqs_and_metadata/metadata.txt \
+  --o-visualization core-metrics-results/shannon_significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/evenness_vector.qza \
+  --o-visualization core-metrics-results/evenness_significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity core-metrics-results/faith_pd_vector.qza \
+  --m-metadata-file seqs_and_metadata/metadata.txt \
+  --o-visualization core-metrics-results/faith_pd_significance.qzv
+
+# Beta Diversity PERMANOVA (Example using Jaccard and Bray-Curtis)
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/jaccard_distance_matrix.qza \
+  --m-metadata-file seqs_and_metadata/metadata.txt \
+  --m-metadata-column Muestra \
+  --o-visualization core-metrics-results/jaccard_significance.qzv
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix core-metrics-results/bray_curtis_distance_matrix.qza \
+  --m-metadata-file seqs_and_metadata/metadata.txt \
+  --m-metadata-column Muestra \
+  --o-visualization core-metrics-results/bray_curtis-significance.qzv
+
+# ------------------------------------------------------------------------------
+# STEP 11: Taxonomic Summaries (Barplots and Level Exports)
+# ------------------------------------------------------------------------------
+qiime taxa barplot \
+  --i-table feature-table-no-archaea.qza \
+  --i-taxonomy taxonomy.qza \
+  --m-metadata-file seqs_and_metadata/metadata.txt \
+  --o-visualization taxa-bar-plots.qzv
