@@ -1,0 +1,149 @@
+#!/bin/bash
+# ==============================================================================
+# PICRUSt2 Bioinformatic Analysis Workflow & Functional Profiling
+# Software Environment: PICRUSt2 (v2.5.2) & QIIME2 (version 2023.5)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# STEP 1: Activate PICRUSt2 Environment
+# ------------------------------------------------------------------------------
+conda activate picrust2
+
+# Verify installation help
+picrust2_pipeline.py --help
+
+# ------------------------------------------------------------------------------
+# STEP 2: Export Feature Table and Representative Sequences from QIIME2
+# ------------------------------------------------------------------------------
+# Ensure QIIME2 is active or use your QIIME2 environment to export:
+# conda activate qiime2-2023.5
+
+# Export BIOM table
+qiime tools export \
+  --input-path feature-table-no-archaea.qza \
+  --output-path exported-feature-table
+
+# Export representative sequences in FASTA format
+qiime tools export \
+  --input-path rep-seqs.qza \
+  --output-path exported-rep-seqs
+
+# ------------------------------------------------------------------------------
+# STEP 3: Run PICRUSt2 Pipeline
+# ------------------------------------------------------------------------------
+# Note: Adjust '-p' according to your CPU available threads (check with 'nproc')
+picrust2_pipeline.py \
+  -s exported-rep-seqs/dna-sequences.fasta \
+  -i exported-feature-table/feature-table.biom \
+  --max_nsti 0.30 \
+  -o picrust2_out_pipeline \
+  -p 12 \
+  --verbose
+
+# ------------------------------------------------------------------------------
+# STEP 4: Add Pathway Descriptions (MetaCyc)
+# ------------------------------------------------------------------------------
+# Decompress MetaCyc unstratified pathway abundances
+gunzip -c picrust2_out_pipeline/pathways_out/path_abun_unstrat.tsv.gz > path_abun_unstrat.tsv
+
+# Add descriptive names to pathways
+add_descriptions.py \
+  -i path_abun_unstrat.tsv \
+  -m METACYC \
+  -o path_abun_unstrat_named.tsv
+
+# ------------------------------------------------------------------------------
+# STEP 5: Convert Abundances to Percentages (%) using Python
+# ------------------------------------------------------------------------------
+python - <<'PY'
+import pandas as pd, numpy as np
+
+infile  = 'path_abun_unstrat_named.tsv'   
+outfile = 'path_abun_unstrat_named_pct.tsv'
+
+# Read table
+df = pd.read_csv(infile, sep='\t')
+
+# Detect numeric columns (samples)
+numeric_cols = []
+for c in df.columns[1:]:
+    col = pd.to_numeric(df[c], errors='coerce')
+    if col.notna().sum() > 0:
+        numeric_cols.append(c)
+
+# Convert to float and normalize to 100%
+df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce').fillna(0.0)
+col_sums = df[numeric_cols].sum(axis=0).replace(0, np.nan)
+df[numeric_cols] = (df[numeric_cols].div(col_sums, axis=1) * 100).fillna(0.0)
+
+# Save output
+df.to_csv(outfile, sep='\t', index=False)
+print(f'Done. File written: {outfile}')
+PY
+
+# ------------------------------------------------------------------------------
+# STEP 6: Import Functional Pathways into QIIME2 for Comparative Analyses
+# ------------------------------------------------------------------------------
+# Convert TSV to BIOM (HDF5 format)
+biom convert \
+  -i path_abun_unstrat.tsv \
+  -o path_abun_unstrat.biom \
+  --table-type="Pathway table" \
+  --to-hdf5
+
+# Import into QIIME2 as FeatureTable[Frequency]
+qiime tools import \
+  --input-path path_abun_unstrat.biom \
+  --type 'FeatureTable[Frequency]' \
+  --input-format BIOMV210Format \
+  --output-path path_abun_unstrat_counts.qza
+
+# ------------------------------------------------------------------------------
+# STEP 7: Beta Diversity, PCoA, and PERMANOVA on Pathways
+# ------------------------------------------------------------------------------
+# Calculate Bray-Curtis distance matrix
+qiime diversity beta \
+  --i-table path_abun_unstrat_counts.qza \
+  --p-metric braycurtis \
+  --o-distance-matrix rutas_braycurtis.qza
+
+# PERMANOVA test across groups (replace 'Muestra' with your metadata column)
+qiime diversity beta-group-significance \
+  --i-distance-matrix rutas_braycurtis.qza \
+  --m-metadata-file metadata.txt \
+  --m-metadata-column Muestra \
+  --p-method permanova \
+  --p-permutations 999 \
+  --o-visualization permanova_rutas.qzv
+
+# PCoA and Emperor Visualization
+qiime diversity pcoa \
+  --i-distance-matrix rutas_braycurtis.qza \
+  --o-pcoa rutas_pcoa.qza
+
+qiime emperor plot \
+  --i-pcoa rutas_pcoa.qza \
+  --m-metadata-file metadata.txt \
+  --o-visualization rutas_pcoa_emperor.qzv
+
+# ------------------------------------------------------------------------------
+# STEP 8: Differential Abundance Analysis (ANCOM) on Pathways
+# ------------------------------------------------------------------------------
+# Filter rare pathways (present in at least 2 samples, min frequency 10)
+qiime feature-table filter-features \
+  --i-table path_abun_unstrat_counts.qza \
+  --p-min-samples 2 \
+  --p-min-frequency 10 \
+  --o-filtered-table table-filt.qza
+
+# Add pseudocount for compositional analysis
+qiime composition add-pseudocount \
+  --i-table table-filt.qza \
+  --o-composition-table table-comp.qza
+
+# Run ANCOM test (replace 'Muestra' with your target group column)
+qiime composition ancom \
+  --i-table table-comp.qza \
+  --m-metadata-file metadata.txt \
+  --m-metadata-column Muestra \
+  --o-visualization ancom-pathways-Muestra.qzv
